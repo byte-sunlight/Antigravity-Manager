@@ -25,11 +25,38 @@ pub struct ResponseFormat {
     pub r#type: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum OpenAIContent {
+    String(String),
+    Array(Vec<OpenAIContentBlock>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum OpenAIContentBlock {
+    #[serde(rename = "text")]
+    Text {
+        text: String,
+    },
+    #[serde(rename = "image_url")]
+    ImageUrl {
+        image_url: OpenAIImageUrl,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenAIImageUrl {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<OpenAIContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]

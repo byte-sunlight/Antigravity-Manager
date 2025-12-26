@@ -85,7 +85,7 @@ pub fn transform_openai_response(gemini_response: &Value) -> OpenAIResponse {
             index: 0,
             message: OpenAIMessage {
                 role: "assistant".to_string(),
-                content: if content_out.is_empty() { None } else { Some(content_out) },
+                content: if content_out.is_empty() { None } else { Some(OpenAIContent::String(content_out)) },
                 tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
                 tool_call_id: None,
             },
@@ -114,7 +114,7 @@ mod tests {
 
         let result = transform_openai_response(&gemini_resp);
         assert_eq!(result.object, "chat.completion");
-        assert_eq!(result.choices[0].message.content, Some("Hello!".to_string()));
+        assert_eq!(result.choices[0].message.content, Some(OpenAIContent::String("Hello!".to_string())));
         assert_eq!(result.choices[0].finish_reason, Some("stop".to_string()));
     }
 }

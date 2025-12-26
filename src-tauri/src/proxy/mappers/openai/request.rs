@@ -12,7 +12,20 @@ pub fn transform_openai_request(request: &OpenAIRequest, project_id: &str, mappe
     // 1. 提取所有 System Message
     let system_instructions: Vec<String> = request.messages.iter()
         .filter(|msg| msg.role == "system")
-        .filter_map(|msg| msg.content.clone())
+        .filter_map(|msg| {
+            msg.content.as_ref().map(|c| match c {
+                OpenAIContent::String(s) => s.clone(),
+                OpenAIContent::Array(blocks) => {
+                    blocks.iter().filter_map(|b| {
+                        if let OpenAIContentBlock::Text { text } = b {
+                            Some(text.clone())
+                        } else {
+                            None
+                        }
+                    }).collect::<Vec<_>>().join("\n")
+                }
+            })
+        })
         .collect();
 
     // 2. 构建 Gemini contents (过滤掉 system)
@@ -29,9 +42,43 @@ pub fn transform_openai_request(request: &OpenAIRequest, project_id: &str, mappe
 
             let mut parts = Vec::new();
             
-            // Handle text content
+            // Handle content (text or array)
             if let Some(content) = &msg.content {
-                parts.push(json!({"text": content}));
+                match content {
+                    OpenAIContent::String(s) => {
+                        parts.push(json!({"text": s}));
+                    }
+                    OpenAIContent::Array(blocks) => {
+                        for block in blocks {
+                            match block {
+                                OpenAIContentBlock::Text { text } => {
+                                    parts.push(json!({"text": text}));
+                                }
+                                OpenAIContentBlock::ImageUrl { image_url } => {
+                                    // Handle data:image/... base64 URI
+                                    if image_url.url.starts_with("data:") {
+                                        if let Some(pos) = image_url.url.find(",") {
+                                            let mime_part = &image_url.url[5..pos];
+                                            let mime_type = mime_part.split(';').next().unwrap_or("image/jpeg");
+                                            let data = &image_url.url[pos + 1..];
+                                            
+                                            parts.push(json!({
+                                                "inlineData": {
+                                                    "mimeType": mime_type,
+                                                    "data": data
+                                                }
+                                            }));
+                                        }
+                                    } else {
+                                        // TODO: Handle remote URLs by fetching? 
+                                        // For now, pass through as text to avoid crash, or just skip
+                                        tracing::warn!("Remote image URLs are not supported in base transformer: {}", image_url.url);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Handle tool calls (assistant message)
@@ -182,7 +229,7 @@ mod tests {
             model: "gpt-4".to_string(),
             messages: vec![OpenAIMessage {
                 role: "user".to_string(),
-                content: Some("Hello".to_string()),
+                content: Some(OpenAIContent::String("Hello".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
             }],
@@ -213,19 +260,19 @@ mod tests {
             messages: vec![
                 OpenAIMessage {
                     role: "system".to_string(),
-                    content: Some("System Prompt 1".to_string()),
+                    content: Some(OpenAIContent::String("System Prompt 1".to_string())),
                     tool_calls: None,
                     tool_call_id: None,
                 },
                 OpenAIMessage {
                     role: "system".to_string(),
-                    content: Some("System Prompt 2".to_string()),
+                    content: Some(OpenAIContent::String("System Prompt 2".to_string())),
                     tool_calls: None,
                     tool_call_id: None,
                 },
                 OpenAIMessage {
                     role: "user".to_string(),
-                    content: Some("User Message".to_string()),
+                    content: Some(OpenAIContent::String("User Message".to_string())),
                     tool_calls: None,
                     tool_call_id: None,
                 }
@@ -257,5 +304,42 @@ mod tests {
         assert_eq!(contents.len(), 1); // Only user message remains
         assert_eq!(contents[0]["role"], "user");
         assert_eq!(contents[0]["parts"][0]["text"], "User Message");
+    }
+
+    #[test]
+    fn test_transform_openai_request_multimodal() {
+        let req = OpenAIRequest {
+            model: "gpt-4-vision".to_string(),
+            messages: vec![OpenAIMessage {
+                role: "user".to_string(),
+                content: Some(OpenAIContent::Array(vec![
+                    OpenAIContentBlock::Text { text: "What is in this image?".to_string() },
+                    OpenAIContentBlock::ImageUrl { 
+                        image_url: OpenAIImageUrl { 
+                            url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==".to_string(),
+                            detail: None 
+                        } 
+                    }
+                ])),
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            stream: false,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stop: None,
+            response_format: None,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let result = transform_openai_request(&req, "test-project", "gemini-1.5-pro-latest");
+        let parts = result["request"]["contents"][0]["parts"].as_array().unwrap();
+        
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["text"], "What is in this image?");
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["data"], "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
     }
 }
