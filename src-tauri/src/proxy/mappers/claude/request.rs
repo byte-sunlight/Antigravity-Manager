@@ -11,11 +11,11 @@ pub fn transform_claude_request_in(
     claude_req: &ClaudeRequest,
     project_id: &str,
 ) -> Result<Value, String> {
-    // 检测是否有 web_search 工具
+    // 检测是否有 web_search 工具 (server tool)
     let has_web_search_tool = claude_req
         .tools
         .as_ref()
-        .map(|tools| tools.iter().any(|t| t.name == "web_search"))
+        .map(|tools| tools.iter().any(|t| t.is_web_search()))
         .unwrap_or(false);
 
     // 用于存储 tool_use id -> name 映射
@@ -381,14 +381,25 @@ fn build_tools(tools: &Option<Vec<Tool>>, has_web_search: bool) -> Result<Option
             }])));
         }
 
-        // 普通工具
+        // 普通工具 (skip server tools like web_search)
         let mut function_declarations = Vec::new();
         for tool in tools_list {
-            let mut input_schema = serde_json::to_value(&tool.input_schema).unwrap_or(json!({}));
+            // Skip server tools - they are handled separately
+            if tool.is_web_search() {
+                continue;
+            }
+
+            // Client tools require input_schema
+            let schema = match &tool.input_schema {
+                Some(s) => s.clone(),
+                None => continue, // Skip tools without schema
+            };
+
+            let mut input_schema = serde_json::to_value(&schema).unwrap_or(json!({}));
             crate::proxy::common::json_schema::clean_json_schema(&mut input_schema);
 
             let tool_decl = json!({
-                "name": tool.name,
+                "name": tool.get_name(),
                 "description": tool.description,
                 "parameters": input_schema
             });

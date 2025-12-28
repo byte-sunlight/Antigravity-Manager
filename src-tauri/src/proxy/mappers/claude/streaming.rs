@@ -44,7 +44,7 @@ impl SignatureManager {
 /// 流式状态机
 pub struct StreamingState {
     block_type: BlockType,
-    block_index: usize,
+    pub block_index: usize,
     pub message_start_sent: bool,
     pub message_stop_sent: bool,
     used_tool: bool,

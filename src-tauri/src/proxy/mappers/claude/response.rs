@@ -159,7 +159,7 @@ impl NonStreamingProcessor {
         // 3. InlineData (Image) 处理
         if let Some(img) = &part.inline_data {
             self.flush_thinking();
-            
+
             let mime_type = &img.mime_type;
             let data = &img.data;
             if !data.is_empty() {
@@ -192,7 +192,10 @@ impl NonStreamingProcessor {
         let thinking = self.thinking_builder.clone();
         let signature = self.thinking_signature.take();
 
-        self.content_blocks.push(ContentBlock::Thinking { thinking, signature });
+        self.content_blocks.push(ContentBlock::Thinking {
+            thinking,
+            signature,
+        });
         self.thinking_builder.clear();
     }
 
@@ -222,16 +225,12 @@ impl NonStreamingProcessor {
             });
 
         ClaudeResponse {
-            id: gemini_response
-                .response_id
-                .clone()
-                .unwrap_or_else(|| format!("msg_{}", crate::proxy::common::utils::generate_random_id())),
+            id: gemini_response.response_id.clone().unwrap_or_else(|| {
+                format!("msg_{}", crate::proxy::common::utils::generate_random_id())
+            }),
             type_: "message".to_string(),
             role: "assistant".to_string(),
-            model: gemini_response
-                .model_version
-                .clone()
-                .unwrap_or_default(),
+            model: gemini_response.model_version.clone().unwrap_or_default(),
             content: self.content_blocks.clone(),
             stop_reason: stop_reason.to_string(),
             stop_sequence: None,
@@ -267,6 +266,7 @@ mod tests {
                 }),
                 finish_reason: Some("STOP".to_string()),
                 index: Some(0),
+                grounding_metadata: None,
             }]),
             usage_metadata: Some(UsageMetadata {
                 prompt_token_count: Some(10),
@@ -320,6 +320,7 @@ mod tests {
                 }),
                 finish_reason: Some("STOP".to_string()),
                 index: Some(0),
+                grounding_metadata: None,
             }]),
             usage_metadata: None,
             model_version: Some("gemini-2.5-pro".to_string()),
@@ -333,7 +334,10 @@ mod tests {
         assert_eq!(claude_resp.content.len(), 2);
 
         match &claude_resp.content[0] {
-            ContentBlock::Thinking { thinking, signature } => {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
                 assert_eq!(thinking, "Let me think...");
                 assert_eq!(signature.as_deref(), Some("sig123"));
             }
