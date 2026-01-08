@@ -454,14 +454,17 @@ pub async fn handle_messages(
     debug!("[{}] Message Count: {}", trace_id, request.messages.len());
     debug!("[{}] Has Tools: {}", trace_id, request.tools.is_some());
     debug!("[{}] Has Thinking Config: {}", trace_id, request.thinking.is_some());
-    debug!("[{}] Content Preview: {:.100}...", trace_id, latest_msg);
+    let safe_preview: String = latest_msg.chars().take(100).collect();
+    debug!("[{}] Content Preview: {}...", trace_id, safe_preview);
     
     // 输出每一条消息的详细信息
     for (idx, msg) in request.messages.iter().enumerate() {
         let content_preview = match &msg.content {
             crate::proxy::mappers::claude::models::MessageContent::String(s) => {
-                if s.len() > 200 {
-                    format!("{}... (total {} chars)", &s[..200], s.len())
+                let char_count = s.chars().count();
+                if char_count > 200 {
+                    let preview: String = s.chars().take(200).collect();
+                    format!("{}... (total {} chars)", preview, char_count)
                 } else {
                     s.clone()
                 }
