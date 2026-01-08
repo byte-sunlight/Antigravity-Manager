@@ -9,6 +9,8 @@ pub enum RateLimitReason {
     QuotaExhausted,
     /// 速率限制 (RATE_LIMIT_EXCEEDED)
     RateLimitExceeded,
+    /// 模型容量耗尽 (MODEL_CAPACITY_EXHAUSTED) - 服务端暂时无可用实例
+    ModelCapacityExhausted,
     /// 服务器错误 (5xx)
     ServerError,
     /// 未知原因
@@ -74,6 +76,7 @@ impl RateLimitTracker {
         
         // 1. 解析限流原因类型
         let reason = if status == 429 {
+            tracing::warn!("Google 429 Error Body: {}", body);
             self.parse_rate_limit_reason(body)
         } else {
             RateLimitReason::ServerError
@@ -102,14 +105,22 @@ impl RateLimitTracker {
             None => {
                 match reason {
                     RateLimitReason::QuotaExhausted => {
-                        // 配额耗尽：使用较长的默认值（1小时），避免频繁重试
-                        tracing::warn!("检测到配额耗尽 (QUOTA_EXHAUSTED)，使用默认值 3600秒 (1小时)");
-                        3600
+                        // [FIX] 将默认锁定时间从 3600s 降至 60s
+                        // Google 的 "Resource exhausted" 经常是分钟级 TPM 限制，而非日配额
+                        // 设置为 60s 可以让账号在 TPM 恢复后尽快投入使用
+                        tracing::warn!("检测到配额耗尽 (QUOTA_EXHAUSTED)，使用保守值 60秒 (原3600秒)");
+                        60
                     },
                     RateLimitReason::RateLimitExceeded => {
                         // 速率限制：使用较短的默认值（30秒），可以较快恢复
                         tracing::debug!("检测到速率限制 (RATE_LIMIT_EXCEEDED)，使用默认值 30秒");
                         30
+                    },
+                    RateLimitReason::ModelCapacityExhausted => {
+                        // [NEW] 模型容量耗尽：服务端暂时无可用 GPU 实例
+                        // 这是临时性问题，使用较短的重试时间（15秒）
+                        tracing::warn!("检测到模型容量不足 (MODEL_CAPACITY_EXHAUSTED)，服务端暂无可用实例，15秒后重试");
+                        15
                     },
                     RateLimitReason::ServerError => {
                         // 服务器错误：执行"软避让"，默认锁定 20 秒
@@ -162,17 +173,29 @@ impl RateLimitTracker {
                     return match reason_str {
                         "QUOTA_EXHAUSTED" => RateLimitReason::QuotaExhausted,
                         "RATE_LIMIT_EXCEEDED" => RateLimitReason::RateLimitExceeded,
+                        "MODEL_CAPACITY_EXHAUSTED" => RateLimitReason::ModelCapacityExhausted,
                         _ => RateLimitReason::Unknown,
                     };
                 }
+                // [NEW] 尝试从 message 字段进行文本匹配（防止 missed reason）
+                 if let Some(msg) = json.get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|v| v.as_str()) {
+                    let msg_lower = msg.to_lowercase();
+                    if msg_lower.contains("per minute") || msg_lower.contains("rate limit") {
+                        return RateLimitReason::RateLimitExceeded;
+                    }
+                 }
             }
         }
         
         // 如果无法从 JSON 解析，尝试从消息文本判断
-        if body.contains("exhausted") || body.contains("quota") {
+        let body_lower = body.to_lowercase();
+        // [FIX] 优先判断分钟级限制，避免将 TPM 误判为 Quota
+        if body_lower.contains("per minute") || body_lower.contains("rate limit") || body_lower.contains("too many requests") {
+             RateLimitReason::RateLimitExceeded
+        } else if body_lower.contains("exhausted") || body_lower.contains("quota") {
             RateLimitReason::QuotaExhausted
-        } else if body.contains("rate limit") || body.contains("too many requests") {
-            RateLimitReason::RateLimitExceeded
         } else {
             RateLimitReason::Unknown
         }
@@ -420,6 +443,19 @@ mod tests {
     }
 
     #[test]
+    fn test_tpm_exhausted_is_rate_limit_exceeded() {
+        let tracker = RateLimitTracker::new();
+        // 模拟真实世界的 TPM 错误，同时包含 "Resource exhausted" 和 "per minute"
+        let body = "Resouce has been exhausted (e.g. check quota). Quota limit 'Tokens per minute' exceeded.";
+        
+        let info = tracker.parse_from_error("acc_tpm", 429, None, body).unwrap();
+        
+        // 期望：被判定为 RateLimitExceeded (30s)，而不是 QuotaExhausted (60s/3600s)
+        assert_eq!(info.reason, RateLimitReason::RateLimitExceeded);
+        assert_eq!(info.retry_after_sec, 30);
+    }
+
+    #[test]
     fn test_safety_buffer() {
         let tracker = RateLimitTracker::new();
         // 如果 API 返回 1s，我们强制设为 2s
@@ -427,5 +463,29 @@ mod tests {
         let wait = tracker.get_remaining_wait("acc1");
         // Due to time passing, it might be 1 or 2
         assert!(wait >= 1 && wait <= 2);
+    }
+
+    #[test]
+    fn test_model_capacity_exhausted() {
+        let tracker = RateLimitTracker::new();
+        // 模拟 Google 服务端模型容量不足的错误
+        let body = r#"{
+            "error": {
+                "code": 429,
+                "message": "No capacity available for model claude-opus-4-5-thinking on the server",
+                "status": "RESOURCE_EXHAUSTED",
+                "details": [{
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "MODEL_CAPACITY_EXHAUSTED",
+                    "domain": "cloudcode-pa.googleapis.com"
+                }]
+            }
+        }"#;
+        
+        let info = tracker.parse_from_error("acc_capacity", 429, None, body).unwrap();
+        
+        // 期望：被判定为 ModelCapacityExhausted (15s)
+        assert_eq!(info.reason, RateLimitReason::ModelCapacityExhausted);
+        assert_eq!(info.retry_after_sec, 15);
     }
 }
